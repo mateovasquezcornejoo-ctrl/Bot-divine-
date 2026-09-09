@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>⚙️ Settings - <%= guild.name %></title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #18181b; color: white; padding: 40px; }
+    .box { background: #27272a; padding: 25px; border-radius: 8px; max-width: 500px; }
+    label { display: block; margin-top: 15px; font-weight: bold; }
+    input[type="text"] { width: 100%; padding: 8px; margin-top: 5px; border-radius: 4px; border: 1px solid #3f3f46; background: #18181b; color: white; }
+    .btn { background: #5865F2; color: white; border: none; padding: 10px 20px; border-radius: 4px; margin-top: 20px; cursor: pointer; }
+    a { color: #a1a1aa; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <a href="/dashboard">← Back to servers</a>
+  <h1>🛡️ Manage <%= guild.name %></h1>
+
+  <div class="box">
+    <form action="/dashboard/<%= guild.id %>/save" method="POST">
+      <label>
+        <input type="checkbox" name="antiraid" <%= antiRaidStatus ? 'checked' : '' %>> Enable Anti-Raid Protection
+      </label>
+
+      <label for="ticket_category">Ticket Category ID:</label>
+      <input type="text" id="ticket_category" name="ticket_category" value="<%= ticketCategory %>" placeholder="123456789012345678">
+
+      <button type="submit" class="btn">💾 Save Settings</button>
+    </form>
+  </div>
+</body>
+</html>

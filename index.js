@@ -6,19 +6,116 @@ const {
   ModalBuilder, TextInputBuilder, TextInputStyle
 } = require('discord.js');
 const express = require('express');
+const session = require('express-session');
+const passport = require('passport');
+const { Strategy } = require('passport-discord');
+const path = require('path');
+const { QuickDB } = require('quick.db');
 
-// SERVIDOR EXPRESS (24/7)
+// BASE DE DATOS LOCAL
+const db = new QuickDB();
+
+// SERVIDOR EXPRESS Y DASHBOARD WEB
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.use(session({
+  secret: 'divine_dashboard_secret_key_2026',
+  resave: false,
+  saveUninitialized: false
+}));
+
+// CONFIGURACIÓN DE PASSPORT (OAuth2 DISCORD)
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((obj, done) => done(null, obj));
+
+passport.use(new Strategy({
+  clientID: process.env.CLIENT_ID,
+  clientSecret: process.env.CLIENT_SECRET,
+  callbackURL: process.env.CALLBACK_URL,
+  scope: ['identify', 'guilds']
+}, (accessToken, refreshToken, profile, done) => {
+  process.nextTick(() => done(null, profile));
+}));
+
+app.use(passport.initialize());
+app.use(passport.session());
+
+// RUTAS DEL DASHBOARD WEB
 app.get('/', (req, res) => {
-  res.send('Bot activo y en funcionamiento 🚀');
+  res.render('index', { user: req.user });
+});
+
+app.get('/login', passport.authenticate('discord'));
+
+app.get('/api/callback', passport.authenticate('discord', { failureRedirect: '/' }), (req, res) => {
+  res.redirect('/dashboard');
+});
+
+app.get('/logout', (req, res) => {
+  req.logout(() => {
+    res.redirect('/');
+  });
+});
+
+// VISTA PRINCIPAL DEL PANEL (Lista Servidores Administrables)
+app.get('/dashboard', (req, res) => {
+  if (!req.user) return res.redirect('/login');
+  // Filtrar servidores donde el usuario es Administrador (Permiso 0x8)
+  const adminGuilds = req.user.guilds.filter(g => (g.permissions & 0x8) === 0x8);
+  res.render('dashboard/index', { user: req.user, guilds: adminGuilds });
+});
+
+// VISTA DE CONFIGURACIÓN POR SERVIDOR
+app.get('/dashboard/:guildID', async (req, res) => {
+  if (!req.user) return res.redirect('/login');
+  
+  const guildID = req.params.guildID;
+  const userGuild = req.user.guilds.find(g => g.id === guildID);
+  if (!userGuild || (userGuild.permissions & 0x8) !== 0x8) {
+    return res.redirect('/dashboard');
+  }
+
+  const guild = client.guilds.cache.get(guildID);
+  if (!guild) {
+    return res.render('dashboard/no-bot', { guildID });
+  }
+
+  // Obtener configuraciones de la base de datos
+  const antiRaidStatus = await db.get(`antiraid_${guildID}`) || false;
+  const ticketCategory = await db.get(`ticket_cat_${guildID}`) || '';
+
+  res.render('dashboard/settings', {
+    user: req.user,
+    guild: guild,
+    antiRaidStatus,
+    ticketCategory
+  });
+});
+
+// POST PARA GUARDAR CONFIGURACIONES DESDE LA WEB
+app.post('/dashboard/:guildID/save', async (req, res) => {
+  if (!req.user) return res.redirect('/login');
+
+  const guildID = req.params.guildID;
+  const { antiraid, ticket_category } = req.body;
+
+  await db.set(`antiraid_${guildID}`, antiraid === 'on');
+  if (ticket_category) await db.set(`ticket_cat_${guildID}`, ticket_category);
+
+  res.redirect(`/dashboard/${guildID}?saved=true`);
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor web escuchando en el puerto ${PORT}`);
+  console.log(`🌐 Servidor web escuchando en el puerto ${PORT}`);
 });
 
+// CONFIGURACIÓN DEL BOT DE DISCORD
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -33,9 +130,6 @@ const OWNER_ID = process.env.OWNER_ID;
 const userWarns = new Map();
 const userBalances = new Map();
 const messageCooldown = new Map();
-let antiRaidActive = false;
-
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function getBalance(userId) {
   if (!userBalances.has(userId)) {
@@ -46,7 +140,6 @@ function getBalance(userId) {
 
 // DEFINICIÓN DE COMANDOS
 const commands = [
-  // --- COMANDOS DE CANALES Y CATEGORÍAS ---
   new SlashCommandBuilder()
     .setName('crear_canal')
     .setDescription('Crea un nuevo canal de texto o voz')
@@ -85,7 +178,6 @@ const commands = [
     .addChannelOption(opt => opt.setName('categoria').setDescription('Categoría a bloquear').addChannelTypes(ChannelType.GuildCategory).setRequired(true))
     .addStringOption(opt => opt.setName('razon').setDescription('Razón del cierre')),
 
-  // --- COMANDOS DE ROLES ---
   new SlashCommandBuilder()
     .setName('crear_rol')
     .setDescription('Crea un nuevo rol en el servidor')
@@ -100,14 +192,12 @@ const commands = [
     .addUserOption(opt => opt.setName('usuario').setDescription('Usuario que recibirá el rol').setRequired(true))
     .addRoleOption(opt => opt.setName('rol').setDescription('Rol a asignar').setRequired(true)),
 
-  // --- MENSAJES DIRECCIÓN ---
   new SlashCommandBuilder()
     .setName('dm')
     .setDescription('Enviar un mensaje directo a un usuario (Owner Override)')
     .addUserOption(opt => opt.setName('usuario').setDescription('El usuario objetivo').setRequired(true))
     .addStringOption(opt => opt.setName('mensaje').setDescription('El contenido del mensaje').setRequired(true)),
 
-  // --- MODERACIÓN Y ANTI-RAID ---
   new SlashCommandBuilder()
     .setName('on_anti_raid')
     .setDescription('Activa la proteccion Anti-Raid')
@@ -164,7 +254,6 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .addIntegerOption(opt => opt.setName('cantidad').setDescription('Cantidad (1-100)').setRequired(true)),
 
-  // --- ECONOMÍA ---
   new SlashCommandBuilder()
     .setName('balance')
     .setDescription('Ver tu saldo o el de otro usuario')
@@ -190,7 +279,6 @@ const commands = [
         { name: 'Green (Verde)', value: 'green' }
       )),
 
-  // --- TICKETS Y UTILIDAD ---
   new SlashCommandBuilder()
     .setName('setup_tickets')
     .setDescription('Crea un panel de tickets dinámico con asignación de personal')
@@ -229,10 +317,13 @@ client.once('ready', async () => {
   }
 });
 
-// SISTEMA ANTI-RAID & ANTI-SPAM
+// SISTEMA ANTI-RAID CONECTADO A BASE DE DATOS LOCAL
 client.on('messageCreate', async message => {
-  if (message.author.bot || !antiRaidActive || !message.guild) return;
+  if (message.author.bot || !message.guild) return;
   if (message.member && message.member.permissions.has(PermissionFlagsBits.Administrator)) return;
+
+  const isAntiRaidActive = await db.get(`antiraid_${message.guild.id}`);
+  if (!isAntiRaidActive) return;
 
   const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 
@@ -279,7 +370,6 @@ client.on('messageCreate', async message => {
 // MANEJO DE INTERACCIONES
 client.on('interactionCreate', async interaction => {
 
-  // SELECCIÓN EN MENÚ DE TICKETS
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_ticket_')) {
     const rawData = interaction.customId.replace('select_ticket_', '');
     const [encodedPregunta, rolId, userId] = rawData.split('::');
@@ -304,7 +394,6 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
-  // ENVÍO DEL FORMULARIO DE TICKET
   if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_ticket_')) {
     const rawData = interaction.customId.replace('modal_ticket_', '');
     const [encodedCategoria, rolId, userId] = rawData.split('::');
@@ -339,9 +428,12 @@ client.on('interactionCreate', async interaction => {
       });
     }
 
+    const parentCat = await db.get(`ticket_cat_${interaction.guild.id}`);
+
     const ticketChannel = await interaction.guild.channels.create({
       name: channelName,
       type: ChannelType.GuildText,
+      parent: parentCat || null,
       permissionOverwrites: permissionOverwrites
     });
 
@@ -373,7 +465,6 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
-  // CERRAR TICKET
   if (interaction.isButton() && interaction.customId === 'close_ticket') {
     await interaction.reply('🔒 El ticket se cerrará en 5 segundos...');
     setTimeout(() => {
@@ -386,7 +477,6 @@ client.on('interactionCreate', async interaction => {
 
   const { commandName, options } = interaction;
 
-  // CREAR CANAL
   if (commandName === 'crear_canal') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
       return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
@@ -412,7 +502,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // BORRAR CANAL
   else if (commandName === 'borrar_canal') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
       return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
@@ -430,7 +519,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // CREAR ROL
   else if (commandName === 'crear_rol') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles)) {
       return interaction.reply({ content: '❌ No tienes permisos para administrar roles.', ephemeral: true });
@@ -453,7 +541,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // DAR ROL
   else if (commandName === 'dar_rol') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles)) {
       return interaction.reply({ content: '❌ No tienes permisos para administrar roles.', ephemeral: true });
@@ -472,7 +559,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // CREAR CATEGORÍA
   else if (commandName === 'crear_categoria') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
       return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
@@ -506,7 +592,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // BORRAR CATEGORÍA
   else if (commandName === 'borrar_categoria') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
       return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
@@ -537,7 +622,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // CERRAR CATEGORÍA (BLOQUEAR PERMISOS)
   else if (commandName === 'cerrar_categoria') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
       return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
@@ -578,7 +662,6 @@ client.on('interactionCreate', async interaction => {
     });
   }
 
-  // OTROS COMANDOS PREVIOS
   else if (commandName === 'mute') {
     const targetUser = options.getUser('usuario');
     const tiempo = options.getInteger('tiempo') || 300;
@@ -706,12 +789,12 @@ client.on('interactionCreate', async interaction => {
   }
 
   else if (commandName === 'on_anti_raid') {
-    antiRaidActive = true;
-    await interaction.reply('🛡️ **Anti-Raid ACTIVADO**.');
+    await db.set(`antiraid_${interaction.guild.id}`, true);
+    await interaction.reply('🛡️ **Anti-Raid ACTIVADO** para este servidor.');
   }
   else if (commandName === 'off_anti_raid') {
-    antiRaidActive = false;
-    await interaction.reply('⚠️ **Anti-Raid DESACTIVADO**');
+    await db.set(`antiraid_${interaction.guild.id}`, false);
+    await interaction.reply('⚠️ **Anti-Raid DESACTIVADO** para este servidor.');
   }
 
   else if (commandName === 'warn') {

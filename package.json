@@ -19,8 +19,14 @@
   },
   "homepage": "https://github.com/mateovasquezcornejoo-ctrl/Bot-divine-#readme",
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
     "discord.js": "^14.27.0",
     "dotenv": "^17.4.2",
-    "express": "^5.2.1"
+    "ejs": "^6.0.1",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "passport": "^0.7.0",
+    "passport-discord": "^0.1.4",
+    "quick.db": "^9.1.7"
   }
 }

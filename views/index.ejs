@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>✨ DIVINE Bot - Dashboard ✨</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #121212; color: white; text-align: center; padding-top: 100px; }
+    .btn { background: #5865F2; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; }
+    .btn:hover { background: #4752C4; }
+  </style>
+</head>
+<body>
+  <h1>✨ Welcome to DIVINE Bot Panel ✨</h1>
+  <p>Manage your servers, tickets, and security easily.</p>
+  <br><br>
+  <% if (user) { %>
+    <a href="/dashboard" class="btn">🚀 Go to Dashboard</a>
+  <% } else { %>
+    <a href="/login" class="btn">🔑 Login with Discord</a>
+  <% } %>
+</body>
+</html>
