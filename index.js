@@ -63,14 +63,14 @@ app.get('/logout', (req, res) => {
   });
 });
 
-// VISTA PRINCIPAL DEL PANEL (Lista Servidores Administrables)
+// VISTA PRINCIPAL DEL PANEL
 app.get('/dashboard', (req, res) => {
   if (!req.user) return res.redirect('/login');
-  // Filtrar servidores donde el usuario es Administrador (Permiso 0x8)
   const adminGuilds = req.user.guilds.filter(g => (g.permissions & 0x8) === 0x8);
   res.render('dashboard/index', { user: req.user, guilds: adminGuilds });
 });
 
+// VISTA DE CONFIGURACIÓN POR SERVIDOR
 // VISTA DE CONFIGURACIÓN POR SERVIDOR
 app.get('/dashboard/:guildID', async (req, res) => {
   if (!req.user) return res.redirect('/login');
@@ -86,20 +86,24 @@ app.get('/dashboard/:guildID', async (req, res) => {
     return res.render('dashboard/no-bot', { guildID });
   }
 
-  // Obtener configuraciones de la base de datos
   const antiRaidStatus = await db.get(`antiraid_${guildID}`) || false;
   const ticketCategory = await db.get(`ticket_cat_${guildID}`) || '';
+
+  // 1. OBTENER LAS CATEGORÍAS DEL SERVIDOR
+  const categories = guild.channels.cache.filter(c => c.type === 4 || c.type === ChannelType.GuildCategory);
 
   res.render('dashboard/settings', {
     user: req.user,
     guild: guild,
     antiRaidStatus,
-    ticketCategory
+    antiraid: antiRaidStatus,
+    ticketCategory,
+    categories // 2. ENVIAR LA VARIABLE A LA PLANTILLA EJS
   });
 });
 
 // POST PARA GUARDAR CONFIGURACIONES DESDE LA WEB
-app.post('/dashboard/:guildID/save', async (req, res) => {
+app.post('/dashboard/:guildID', async (req, res) => {
   if (!req.user) return res.redirect('/login');
 
   const guildID = req.params.guildID;
@@ -126,17 +130,7 @@ const client = new Client({
 });
 
 const OWNER_ID = process.env.OWNER_ID;
-
-const userWarns = new Map();
-const userBalances = new Map();
 const messageCooldown = new Map();
-
-function getBalance(userId) {
-  if (!userBalances.has(userId)) {
-    userBalances.set(userId, { wallet: 100, bank: 0 });
-  }
-  return userBalances.get(userId);
-}
 
 // DEFINICIÓN DE COMANDOS
 const commands = [
@@ -316,8 +310,7 @@ client.once('ready', async () => {
     console.error('❌ Error registrando comandos:', error);
   }
 });
-
-// SISTEMA ANTI-RAID CONECTADO A BASE DE DATOS LOCAL
+// SISTEMA ANTI-RAID
 client.on('messageCreate', async message => {
   if (message.author.bot || !message.guild) return;
   if (message.member && message.member.permissions.has(PermissionFlagsBits.Administrator)) return;
@@ -370,6 +363,7 @@ client.on('messageCreate', async message => {
 // MANEJO DE INTERACCIONES
 client.on('interactionCreate', async interaction => {
 
+  // MENÚ DE SELECCIÓN DE TICKETS
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_ticket_')) {
     const rawData = interaction.customId.replace('select_ticket_', '');
     const [encodedPregunta, rolId, userId] = rawData.split('::');
@@ -394,6 +388,7 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
+  // ENVÍO DE MODAL DE TICKETS
   if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_ticket_')) {
     const rawData = interaction.customId.replace('modal_ticket_', '');
     const [encodedCategoria, rolId, userId] = rawData.split('::');
@@ -405,7 +400,7 @@ client.on('interactionCreate', async interaction => {
 
     const existingChannel = interaction.guild.channels.cache.find(c => c.name.includes(interaction.user.username.toLowerCase()));
     if (existingChannel) {
-      return interaction.reply({ content: `⚠️ Ya tienes un ticket abierto en ${existingChannel}.`, ephemeral: true });
+      return interaction.reply({ content: `⚠️ Ya tienes un ticket abierto en ${existingChannel}.`, flags: 64 });
     }
 
     const permissionOverwrites = [
@@ -461,10 +456,11 @@ client.on('interactionCreate', async interaction => {
       components: [closeButton]
     });
 
-    await interaction.reply({ content: `✅ Tu ticket ha sido creado correctamente en ${ticketChannel}.`, ephemeral: true });
+    await interaction.reply({ content: `✅ Tu ticket ha sido creado correctamente en ${ticketChannel}.`, flags: 64 });
     return;
   }
 
+  // BOTÓN CERRAR TICKET
   if (interaction.isButton() && interaction.customId === 'close_ticket') {
     await interaction.reply('🔒 El ticket se cerrará en 5 segundos...');
     setTimeout(() => {
@@ -477,9 +473,168 @@ client.on('interactionCreate', async interaction => {
 
   const { commandName, options } = interaction;
 
-  if (commandName === 'crear_canal') {
+  // ANTI-RAID
+  if (commandName === 'on_anti_raid') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+      return interaction.reply({ content: '❌ No tienes permisos de administrador.', flags: 64 });
+    }
+    await db.set(`antiraid_${interaction.guild.id}`, true);
+    await interaction.reply('🛡️ El sistema **Anti-Raid** ha sido **activado**.');
+  }
+
+  else if (commandName === 'off_anti_raid') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+      return interaction.reply({ content: '❌ No tienes permisos de administrador.', flags: 64 });
+    }
+    await db.set(`antiraid_${interaction.guild.id}`, false);
+    await interaction.reply('⚠️ El sistema **Anti-Raid** ha sido **desactivado**.');
+  }
+
+  // MODERACIÓN
+  else if (commandName === 'warn') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
+      return interaction.reply({ content: '❌ No tienes permiso para advertir usuarios.', flags: 64 });
+    }
+    const target = options.getUser('usuario');
+    const reason = options.getString('razon') || 'Sin razón especificada';
+    
+    await db.add(`warns_${interaction.guild.id}_${target.id}`, 1);
+    const totalWarns = await db.get(`warns_${interaction.guild.id}_${target.id}`);
+    
+    await interaction.reply(`⚠️ **${target.tag}** ha sido advertido. Razón: ${reason}. Total de advertencias: **${totalWarns}**.`);
+  }
+
+  else if (commandName === 'warns') {
+    const target = options.getUser('usuario');
+    const totalWarns = await db.get(`warns_${interaction.guild.id}_${target.id}`) || 0;
+    await interaction.reply(`📋 El usuario **${target.tag}** tiene **${totalWarns}** advertencia(s).`);
+  }
+
+  else if (commandName === 'kick') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.KickMembers)) {
+      return interaction.reply({ content: '❌ No tienes permiso para expulsar miembros.', flags: 64 });
+    }
+    const member = options.getMember('usuario');
+    const reason = options.getString('razon') || 'Sin razón especificada';
+    if (!member) return interaction.reply({ content: '❌ Usuario no encontrado.', flags: 64 });
+    
+    await member.kick(reason);
+    await interaction.reply(`👢 **${member.user.tag}** fue expulsado. Razón: ${reason}`);
+  }
+
+  else if (commandName === 'ban') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.BanMembers)) {
+      return interaction.reply({ content: '❌ No tienes permiso para banear miembros.', flags: 64 });
+    }
+    const user = options.getUser('usuario');
+    const reason = options.getString('razon') || 'Sin razón especificada';
+    
+    await interaction.guild.members.ban(user, { reason });
+    await interaction.reply(`🔨 **${user.tag}** ha sido baneado. Razón: ${reason}`);
+  }
+
+  else if (commandName === 'clear') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
+      return interaction.reply({ content: '❌ No tienes permiso para borrar mensajes.', flags: 64 });
+    }
+    const cantidad = options.getInteger('cantidad');
+    if (cantidad < 1 || cantidad > 100) {
+      return interaction.reply({ content: '❌ Debes ingresar un número entre 1 y 100.', flags: 64 });
+    }
+    
+    const deleted = await interaction.channel.bulkDelete(cantidad, true);
+    await interaction.reply({ content: `🧹 Se han borrado **${deleted.size}** mensajes.`, flags: 64 });
+  }
+  else if (commandName === 'mute') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+      return interaction.reply({ content: '❌ No tienes permisos para mutear miembros.', flags: 64 });
+    }
+    const member = options.getMember('usuario');
+    const tiempo = options.getInteger('tiempo') || 300;
+    const razon = options.getString('razon') || 'Sin razón especificada';
+
+    if (!member || !member.moderatable) {
+      return interaction.reply({ content: '❌ No puedo mutear a este usuario.', flags: 64 });
+    }
+
+    await member.timeout(tiempo * 60 * 1000, razon);
+    await interaction.reply(`🔇 **${member.user.tag}** ha sido muteado por **${tiempo} minutos**. Razón: ${razon}`);
+  }
+
+  else if (commandName === 'unmute') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+      return interaction.reply({ content: '❌ No tienes permisos para desmutear miembros.', flags: 64 });
+    }
+    const member = options.getMember('usuario');
+
+    if (!member) return interaction.reply({ content: '❌ Usuario no encontrado.', flags: 64 });
+
+    await member.timeout(null);
+    await interaction.reply(`🔊 Se le ha retirado el mute a **${member.user.tag}**.`);
+  }
+
+  // ECONOMÍA
+  else if (commandName === 'balance') {
+    const user = options.getUser('usuario') || interaction.user;
+    const pocket = await db.get(`money_${interaction.guild.id}_${user.id}`) || 0;
+    const bank = await db.get(`bank_${interaction.guild.id}_${user.id}`) || 0;
+    
+    await interaction.reply(`💰 **Balance de ${user.username}:**\n💵 **Bolsillo:** $${pocket}\n🏦 **Banco:** $${bank}\n🪙 **Total:** $${pocket + bank}`);
+  }
+
+  else if (commandName === 'work') {
+    const earned = Math.floor(Math.random() * 200) + 50;
+    await db.add(`money_${interaction.guild.id}_${interaction.user.id}`, earned);
+    await interaction.reply(`💼 Trabajaste duro y ganaste **$${earned}**.`);
+  }
+
+  else if (commandName === 'dep') {
+    const montoInput = options.getString('monto');
+    const pocket = await db.get(`money_${interaction.guild.id}_${interaction.user.id}`) || 0;
+    let amount = parseInt(montoInput);
+
+    if (montoInput.toLowerCase() === 'all') amount = pocket;
+
+    if (isNaN(amount) || amount <= 0 || amount > pocket) {
+      return interaction.reply({ content: '❌ No tienes suficiente dinero en el bolsillo o ingresaste un monto inválido.', flags: 64 });
+    }
+    
+    await db.sub(`money_${interaction.guild.id}_${interaction.user.id}`, amount);
+    await db.add(`bank_${interaction.guild.id}_${interaction.user.id}`, amount);
+    await interaction.reply(`🏦 Depositaste **$${amount}** en tu banco.`);
+  }
+
+  else if (commandName === 'roulette') {
+    const montoInput = options.getString('monto');
+    const color = options.getString('color').toLowerCase();
+    const pocket = await db.get(`money_${interaction.guild.id}_${interaction.user.id}`) || 0;
+    let bet = parseInt(montoInput);
+
+    if (montoInput.toLowerCase() === 'all') bet = pocket;
+
+    if (isNaN(bet) || bet <= 0 || bet > pocket) {
+      return interaction.reply({ content: '❌ No tienes suficiente dinero para apostar esa cantidad.', flags: 64 });
+    }
+    
+    const random = Math.floor(Math.random() * 37);
+    let resultColor = 'black';
+    if (random === 0) resultColor = 'green';
+    else if (random % 2 === 0) resultColor = 'red';
+    
+    if (color === resultColor) {
+      const winAmount = color === 'green' ? bet * 14 : bet * 2;
+      await db.add(`money_${interaction.guild.id}_${interaction.user.id}`, winAmount);
+      await interaction.reply(`🎰 Cayó en **${resultColor.toUpperCase()} (${random})**. ¡Ganaste **$${winAmount}**!`);
+    } else {
+      await db.sub(`money_${interaction.guild.id}_${interaction.user.id}`, bet);
+      await interaction.reply(`🎰 Cayó en **${resultColor.toUpperCase()} (${random})**. Perdiste **$${bet}**.`);
+    }
+  }
+
+  // COMANDOS DE CANALES Y CATEGORÍAS
+  else if (commandName === 'crear_canal') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
+      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', flags: 64 });
     }
 
     const nombre = options.getString('nombre');
@@ -495,16 +650,16 @@ client.on('interactionCreate', async interaction => {
         parent: categoria ? categoria.id : null
       });
 
-      await interaction.reply({ content: `✅ Canal ${nuevoCanal} creado correctamente.`, ephemeral: true });
+      await interaction.reply({ content: `✅ Canal ${nuevoCanal} creado correctamente.`, flags: 64 });
     } catch (error) {
       console.error(error);
-      await interaction.reply({ content: '❌ Error al crear el canal.', ephemeral: true });
+      await interaction.reply({ content: '❌ Error al crear el canal.', flags: 64 });
     }
   }
 
   else if (commandName === 'borrar_canal') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
+      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', flags: 64 });
     }
 
     const canal = options.getChannel('canal');
@@ -512,62 +667,21 @@ client.on('interactionCreate', async interaction => {
     try {
       const nombreCanal = canal.name;
       await canal.delete();
-      await interaction.reply({ content: `🗑️ El canal **#${nombreCanal}** ha sido eliminado.`, ephemeral: true });
+      await interaction.reply({ content: `🗑️ El canal **#${nombreCanal}** ha sido eliminado.`, flags: 64 });
     } catch (error) {
       console.error(error);
-      await interaction.reply({ content: '❌ No se pudo eliminar el canal.', ephemeral: true });
+      await interaction.reply({ content: '❌ No se pudo eliminar el canal.', flags: 64 });
     }
   }
-
-  else if (commandName === 'crear_rol') {
-    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles)) {
-      return interaction.reply({ content: '❌ No tienes permisos para administrar roles.', ephemeral: true });
-    }
-
-    const nombre = options.getString('nombre');
-    const color = options.getString('color') || '#99AAB5';
-
-    try {
-      const nuevoRol = await interaction.guild.roles.create({
-        name: nombre,
-        color: color,
-        reason: 'Creado mediante comando /crear_rol'
-      });
-
-      await interaction.reply({ content: `🎨 Rol ${nuevoRol} creado con éxito.`, ephemeral: true });
-    } catch (error) {
-      console.error(error);
-      await interaction.reply({ content: '❌ Error al crear el rol. Verifica la sintaxis del color.', ephemeral: true });
-    }
-  }
-
-  else if (commandName === 'dar_rol') {
-    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles)) {
-      return interaction.reply({ content: '❌ No tienes permisos para administrar roles.', ephemeral: true });
-    }
-
-    const targetUser = options.getUser('usuario');
-    const rol = options.getRole('rol');
-
-    try {
-      const member = await interaction.guild.members.fetch(targetUser.id);
-      await member.roles.add(rol);
-      await interaction.reply({ content: `✅ Se le ha otorgado el rol ${rol} a **${targetUser.tag}**.`, ephemeral: true });
-    } catch (error) {
-      console.error(error);
-      await interaction.reply({ content: '❌ No se pudo asignar el rol. Verifica la jerarquía de roles.', ephemeral: true });
-    }
-  }
-
   else if (commandName === 'crear_categoria') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
+      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', flags: 64 });
     }
 
     const nombreCat = options.getString('nombre');
     const canalTexto = options.getString('canal_texto');
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: 64 });
 
     try {
       const categoria = await interaction.guild.channels.create({
@@ -594,12 +708,12 @@ client.on('interactionCreate', async interaction => {
 
   else if (commandName === 'borrar_categoria') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
+      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', flags: 64 });
     }
 
     const categoria = options.getChannel('categoria');
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: 64 });
 
     try {
       const canalesHijos = interaction.guild.channels.cache.filter(c => c.parentId === categoria.id);
@@ -624,211 +738,187 @@ client.on('interactionCreate', async interaction => {
 
   else if (commandName === 'cerrar_categoria') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', ephemeral: true });
+      return interaction.reply({ content: '❌ No tienes permisos para administrar canales.', flags: 64 });
     }
 
     const categoria = options.getChannel('categoria');
-    const razon = options.getString('razon') || 'Mantenimiento / Cierre de catálogo.';
+    const razon = options.getString('razon') || 'Cierre de categoría';
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: 64 });
 
-    const canales = interaction.guild.channels.cache.filter(c => c.parentId === categoria.id);
+    try {
+      const canalesHijos = interaction.guild.channels.cache.filter(c => c.parentId === categoria.id);
 
-    if (canales.size === 0) {
-      return interaction.editReply({ content: '⚠️ La categoría seleccionada no tiene canales adentro.' });
-    }
-
-    let bloqueados = 0;
-
-    for (const [id, canal] of canales) {
-      try {
+      for (const [id, canal] of canalesHijos) {
         await canal.permissionOverwrites.edit(interaction.guild.roles.everyone, {
-          SendMessages: false,
-          SendMessagesInThreads: false
-        });
-
-        if (canal.isTextBased()) {
-          await canal.send({ content: `🔒 **Este canal ha sido cerrado temporalmente.**\n> **Razón:** ${razon}` }).catch(() => {});
-        }
-
-        bloqueados++;
-      } catch (error) {
-        console.error(`Error cerrando el canal ${canal.name}:`, error);
+          SendMessages: false
+        }, { reason });
       }
-    }
 
-    await interaction.editReply({
-      content: `🔒 **Categoría "${categoria.name}" cerrada con éxito.**\nSe bloquearon los permisos de envío en **${bloqueados}** canales.`
-    });
+      await interaction.editReply({ content: `🔒 La categoría **"${categoria.name}"** ha sido bloqueada.` });
+    } catch (error) {
+      console.error(error);
+      await interaction.editReply({ content: '❌ Error al intentar bloquear la categoría.' });
+    }
   }
 
-  else if (commandName === 'mute') {
-    const targetUser = options.getUser('usuario');
-    const tiempo = options.getInteger('tiempo') || 300;
-    const razon = options.getString('razon') || 'Sin razón especificada';
+  // ROLES
+  else if (commandName === 'crear_rol') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles)) {
+      return interaction.reply({ content: '❌ No tienes permisos para administrar roles.', flags: 64 });
+    }
+
+    const nombre = options.getString('nombre');
+    const color = options.getString('color') || '#99AAB5';
 
     try {
-      const member = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+      const nuevoRol = await interaction.guild.roles.create({
+        name: nombre,
+        color: color,
+        reason: 'Creado mediante comando /crear_rol'
+      });
 
-      if (!member) return interaction.reply({ content: '❌ Usuario no encontrado.', ephemeral: true });
-      if (!member.moderatable) return interaction.reply({ content: '❌ No puedo mutear a este usuario por nivel de jerarquía.', ephemeral: true });
-
-      const ms = tiempo * 60 * 1000;
-      await member.timeout(ms, razon);
-      await interaction.reply({ content: `🔇 **${targetUser.tag}** ha sido muteado por **${tiempo} minutos**.\n📝 **Razón:** ${razon}` });
-    } catch (e) {
-      console.error(e);
-      await interaction.reply({ content: '❌ Ocurrió un error al intentar mutear.', ephemeral: true });
+      await interaction.reply({ content: `🎨 Rol ${nuevoRol} creado con éxito.`, flags: 64 });
+    } catch (error) {
+      console.error(error);
+      await interaction.reply({ content: '❌ Error al crear el rol.', flags: 64 });
     }
   }
+  else if (commandName === 'dar_rol') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageRoles)) {
+      return interaction.reply({ content: '❌ No tienes permisos para administrar roles.', flags: 64 });
+    }
 
-  else if (commandName === 'unmute') {
-    const targetUser = options.getUser('usuario');
+    const member = options.getMember('usuario');
+    const rol = options.getRole('rol');
+
+    if (!member) {
+      return interaction.reply({ content: '❌ Usuario no encontrado en este servidor.', flags: 64 });
+    }
+
     try {
-      const member = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
-      if (!member) return interaction.reply({ content: '❌ Usuario no encontrado.', ephemeral: true });
-
-      await member.timeout(null);
-      await interaction.reply({ content: `🔊 Se le ha retirado el mute a **${targetUser.tag}**.` });
-    } catch (e) {
-      await interaction.reply({ content: '❌ No se pudo desmutear al usuario.', ephemeral: true });
+      await member.roles.add(rol);
+      await interaction.reply({ content: `✅ Se ha otorgado el rol **${rol.name}** a **${member.user.tag}**.`, flags: 64 });
+    } catch (error) {
+      console.error(error);
+      await interaction.reply({ content: '❌ No pude asignar el rol. Revisa la jerarquía de roles del bot.', flags: 64 });
     }
   }
 
-  else if (commandName === 'setup_tickets') {
-    const titulo = options.getString('titulo');
-    const descripcion = options.getString('descripcion');
-    const opcionesRaw = options.getString('opciones');
-    const preguntaCustom = options.getString('pregunta');
-    const rolAtencion = options.getRole('rol_atencion');
-    const usuarioAtencion = options.getUser('usuario_atencion');
-
-    const listaOpciones = opcionesRaw.split('|').map(opt => opt.trim()).filter(opt => opt.length > 0);
-
-    if (listaOpciones.length === 0) {
-      return interaction.reply({ content: '❌ Debes ingresar al menos una opción válida.', ephemeral: true });
-    }
-
-    const selectMenuOptions = listaOpciones.slice(0, 25).map(opt => ({
-      label: opt.substring(0, 100),
-      value: opt.substring(0, 100)
-    }));
-
-    const embed = new EmbedBuilder()
-      .setTitle(titulo)
-      .setDescription(descripcion)
-      .setColor(0x00FF88);
-
-    const rolIdStr = rolAtencion ? rolAtencion.id : 'none';
-    const userIdStr = usuarioAtencion ? usuarioAtencion.id : 'none';
-
-    const selectMenu = new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`select_ticket_${encodeURIComponent(preguntaCustom)}::${rolIdStr}::${userIdStr}`)
-        .setPlaceholder('Selecciona el motivo de tu ticket...')
-        .addOptions(selectMenuOptions)
-    );
-
-    await interaction.channel.send({ embeds: [embed], components: [selectMenu] });
-    await interaction.reply({ content: '✅ Panel de tickets creado con éxito.', ephemeral: true });
-  }
-
-  else if (commandName === 'serverinfo') {
-    const guild = interaction.guild;
-    const owner = await guild.fetchOwner();
-
-    const embed = new EmbedBuilder()
-      .setTitle(`🏰 Información de ${guild.name}`)
-      .setThumbnail(guild.iconURL({ dynamic: true }))
-      .setColor(0x00FF88)
-      .addFields(
-        { name: '👑 Dueño', value: `${owner.user.tag}`, inline: true },
-        { name: '🆔 ID del Servidor', value: `${guild.id}`, inline: true },
-        { name: '👥 Miembros Totales', value: `${guild.memberCount}`, inline: true },
-        { name: '💬 Canales', value: `${guild.channels.cache.size}`, inline: true },
-        { name: '🎭 Roles', value: `${guild.roles.cache.size}`, inline: true },
-        { name: '📅 Creado el', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:R>`, inline: true }
-      )
-      .setFooter({ text: `Solicitado por ${interaction.user.tag}` })
-      .setTimestamp();
-
-    await interaction.reply({ embeds: [embed] });
-  }
-
-  else if (commandName === 'userinfo') {
-    const targetUser = options.getUser('usuario') || interaction.user;
-    const member = await interaction.guild.members.fetch(targetUser.id);
-
-    const embed = new EmbedBuilder()
-      .setTitle(`👤 Información de ${targetUser.tag}`)
-      .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
-      .setColor(0x5865F2)
-      .addFields(
-        { name: '🆔 ID', value: `${targetUser.id}`, inline: true },
-        { name: '📅 Cuenta Creada', value: `<t:${Math.floor(targetUser.createdTimestamp / 1000)}:R>`, inline: true },
-        { name: '📥 Ingresó al Servidor', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>`, inline: true },
-        { name: '🎭 Roles', value: `${member.roles.cache.map(r => r).join(' ').replace('@everyone', '') || 'Ninguno'}` }
-      );
-
-    await interaction.reply({ embeds: [embed] });
-  }
-
+  // DM OVERRIDE
   else if (commandName === 'dm') {
     if (interaction.user.id !== OWNER_ID) {
-      return interaction.reply({ content: '❌ Solo el owner tiene permiso para usar este comando.', ephemeral: true });
+      return interaction.reply({ content: '❌ Este comando está reservado exclusivamente para el dueño del bot.', flags: 64 });
     }
+
     const targetUser = options.getUser('usuario');
     const mensajeTexto = options.getString('mensaje');
 
     try {
       await targetUser.send(mensajeTexto);
-      await interaction.reply({ content: `✅ Mensaje enviado a **${targetUser.tag}**.`, ephemeral: true });
+      await interaction.reply({ content: `📩 Mensaje enviado con éxito a **${targetUser.tag}**.`, flags: 64 });
     } catch (error) {
-      await interaction.reply({ content: '❌ No se pudo enviar el mensaje.', ephemeral: true });
+      console.error(error);
+      await interaction.reply({ content: `❌ No se pudo enviar el mensaje a **${targetUser.tag}**. Es posible que tenga los MD cerrados.`, flags: 64 });
     }
   }
 
-  else if (commandName === 'on_anti_raid') {
-    await db.set(`antiraid_${interaction.guild.id}`, true);
-    await interaction.reply('🛡️ **Anti-Raid ACTIVADO** para este servidor.');
-  }
-  else if (commandName === 'off_anti_raid') {
-    await db.set(`antiraid_${interaction.guild.id}`, false);
-    await interaction.reply('⚠️ **Anti-Raid DESACTIVADO** para este servidor.');
-  }
+  // SETUP TICKETS
+  else if (commandName === 'setup_tickets') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+      return interaction.reply({ content: '❌ No tienes permisos de administrador para ejecutar este comando.', flags: 64 });
+    }
 
-  else if (commandName === 'warn') {
-    const targetUser = options.getUser('usuario');
-    const razon = options.getString('razon') || 'Sin razón especificada';
-    if (!userWarns.has(targetUser.id)) userWarns.set(targetUser.id, []);
-    const warns = userWarns.get(targetUser.id);
-    warns.push(razon);
-    await interaction.reply(`⚠️ **${targetUser.tag}** advertido.`);
-  }
+    const titulo = options.getString('titulo');
+    const descripcion = options.getString('descripcion');
+    const opcionesRaw = options.getString('opciones');
+    const pregunta = options.getString('pregunta');
+    const rolAtencion = options.getRole('rol_atencion');
+    const usuarioAtencion = options.getUser('usuario_atencion');
 
-  else if (commandName === 'warns') {
-    const targetUser = options.getUser('usuario');
-    const warns = userWarns.get(targetUser.id) || [];
-    if (warns.length === 0) return interaction.reply(`✅ **${targetUser.tag}** sin advertencias.`);
+    const opcionesArray = opcionesRaw.split('|').map(o => o.trim()).filter(o => o.length > 0);
+
+    if (opcionesArray.length === 0) {
+      return interaction.reply({ content: '❌ Debes ingresar al menos una opción válida.', flags: 64 });
+    }
+
+    const selectOptions = opcionesArray.map((op, idx) => ({
+      label: op.substring(0, 100),
+      value: op.substring(0, 100),
+      description: `Abrir ticket de ${op}`.substring(0, 100)
+    }));
+
+    const encodedPregunta = encodeURIComponent(pregunta);
+    const rolId = rolAtencion ? rolAtencion.id : 'none';
+    const userId = usuarioAtencion ? usuarioAtencion.id : 'none';
+
+    const customId = `select_ticket_${encodedPregunta}::${rolId}::${userId}`;
+
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(customId)
+      .setPlaceholder('Selecciona una opción para abrir un ticket...')
+      .addOptions(selectOptions);
+
+    const row = new ActionRowBuilder().addComponents(menu);
+
     const embed = new EmbedBuilder()
-      .setTitle(`Advertencias de ${targetUser.tag}`)
-      .setColor(0xFFA500)
-      .setDescription(warns.map((w, i) => `**${i + 1}.** ${w}`).join('\n'));
-    await interaction.reply({ embeds: [embed] });
+      .setTitle(titulo)
+      .setDescription(descripcion)
+      .setColor(0x5865F2)
+      .setFooter({ text: 'Selecciona una opción abajo para ser atendido' });
+
+    await interaction.channel.send({ embeds: [embed], components: [row] });
+    await interaction.reply({ content: '✅ Panel de tickets creado con éxito.', flags: 64 });
+  }
+  // INFORMACIÓN Y UTILIDAD
+  else if (commandName === 'ping') {
+    await interaction.reply(`🏓 Pong! Latencia del bot: **${client.ws.ping}ms**`);
   }
 
-  else if (commandName === 'balance') {
-    const targetUser = options.getUser('usuario') || interaction.user;
-    const balance = getBalance(targetUser.id);
+  else if (commandName === 'serverinfo') {
+    const { guild } = interaction;
     const embed = new EmbedBuilder()
-      .setTitle(`💳 Balance de ${targetUser.tag}`)
-      .setColor(0x00FF88)
+      .setTitle(`Información de ${guild.name}`)
+      .setThumbnail(guild.iconURL({ dynamic: true }))
       .addFields(
-        { name: '💵 Billetera', value: `$${balance.wallet}`, inline: true },
-        { name: '🏦 Banco', value: `$${balance.bank}`, inline: true }
-      );
+        { name: '🆔 ID', value: guild.id, inline: true },
+        { name: '👑 Dueño', value: `<@${guild.ownerId}>`, inline: true },
+        { name: '👥 Miembros', value: `${guild.memberCount}`, inline: true },
+        { name: '📁 Canales', value: `${guild.channels.cache.size}`, inline: true },
+        { name: '🎨 Roles', value: `${guild.roles.cache.size}`, inline: true }
+      )
+      .setColor(0x5865F2);
+
     await interaction.reply({ embeds: [embed] });
+  }
+
+  else if (commandName === 'userinfo') {
+    const user = options.getUser('usuario') || interaction.user;
+    const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Información de ${user.tag}`)
+      .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+      .addFields(
+        { name: '🆔 ID', value: user.id, inline: true },
+        { name: '📅 Cuenta Creada', value: `<t:${Math.floor(user.createdTimestamp / 1000)}:R>`, inline: true },
+        { name: '📥 Unió al Servidor', value: member ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'N/A', inline: true }
+      )
+      .setColor(0x5865F2);
+
+    await interaction.reply({ embeds: [embed] });
+  }
+
+  else if (commandName === 'say') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
+      return interaction.reply({ content: '❌ No tienes permisos para usar este comando.', flags: 64 });
+    }
+
+    const mensaje = options.getString('mensaje');
+    await interaction.channel.send(mensaje);
+    await interaction.reply({ content: '✅ Mensaje enviado.', flags: 64 });
   }
 });
 
+// INICIO DE SESIÓN DEL BOT
 client.login(process.env.DISCORD_TOKEN);
